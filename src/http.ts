@@ -16,11 +16,6 @@ function checkAuth(req: IncomingMessage, res: ServerResponse): boolean {
 }
 
 async function main(): Promise<void> {
-  const mcpServer = createServer();
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-
-  await mcpServer.connect(transport);
-
   const PORT = Number(process.env.PORT ?? 3000);
 
   const httpServer = createHTTPServer(async (req, res) => {
@@ -33,6 +28,14 @@ async function main(): Promise<void> {
 
     // D1: Bearer token auth
     if (!checkAuth(req, res)) return;
+
+    // Stateless mode: create a fresh transport + server per request.
+    // StreamableHTTPServerTransport is single-use in stateless mode —
+    // sharing one instance across requests causes all requests after the
+    // first to fail with 500.
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const mcpServer = createServer();
+    await mcpServer.connect(transport);
 
     try {
       await transport.handleRequest(req, res);
