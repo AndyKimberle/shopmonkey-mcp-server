@@ -2,6 +2,12 @@
 
 This document lists operations the Shopmonkey MCP server does **not** support, with rationale and workarounds. All limitations are verified against the [Shopmonkey REST API v3](https://shopmonkey.dev/overview).
 
+## HTTP Transport Notes
+
+### Transport Instance Lifetime
+
+`StreamableHTTPServerTransport` must be instantiated **per request** in stateless mode (`sessionIdGenerator: undefined`). A shared instance is exhausted after the first request — all subsequent requests return 500 with no server-side error output. The `src/http.ts` handler creates a fresh transport and MCP server for each incoming request to avoid this.
+
 ## Unsupported Operations
 
 ### `delete_order` — Order Deletion
