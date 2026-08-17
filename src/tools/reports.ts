@@ -4,7 +4,7 @@
 // 100 records per call; use a tighter date range for high-volume shops.
 // All tools return raw JSON (not Markdown) for downstream processing flexibility.
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { shopmonkeyRequest, getDefaultLocationId, buildDateRangeWhere } from '../client.js';
+import { shopmonkeyRequest, getDefaultLocationId, isWithinDateRange } from '../client.js';
 import type { Order, Appointment } from '../types/shopmonkey.js';
 import type { ToolHandlerMap } from '../types/tools.js';
 
@@ -47,6 +47,8 @@ export const definitions: Tool[] = [
   },
   ];
 
+
+
 function getDefaultLocParam(): Record<string, string> {
     const params: Record<string, string> = { limit: '100' };
     const defaultId = getDefaultLocationId();
@@ -61,10 +63,12 @@ export const handlers: ToolHandlerMap = {
 
       const params = getDefaultLocParam();
           if (args.locationId !== undefined) params.locationId = String(args.locationId);
-          const where = buildDateRangeWhere('createdDate', String(args.startDate), String(args.endDate));
-          if (where) params.where = where;
+          // Shopmonkey's /order endpoint does not reliably filter by date
+      // server-side (verified against the live API), so we filter client-side
+      // against the order's createdDate. See isWithinDateRange in client.ts.
+      const fetchedOrders = await shopmonkeyRequest<Order[]>('GET', '/order', undefined, params);
+          const orders = fetchedOrders.filter(o => isWithinDateRange(String(o.createdDate ?? ''), String(args.startDate), String(args.endDate)));
 
-      const orders = await shopmonkeyRequest<Order[]>('GET', '/order', undefined, params);
 
       const breakdown: Record<string, { count: number; totalCostCents: number }> = {};
           let totalCostCents = 0;
@@ -102,10 +106,10 @@ export const handlers: ToolHandlerMap = {
 
       const params = getDefaultLocParam();
           if (args.locationId !== undefined) params.locationId = String(args.locationId);
-          const where = buildDateRangeWhere('startDate', String(args.startDate), String(args.endDate));
-          if (where) params.where = where;
-
-      const appointments = await shopmonkeyRequest<Appointment[]>('GET', '/appointment', undefined, params);
+          // See note in report_revenue_summary above — filtering is done
+      // client-side against the appointment's own startDate.
+      const fetchedAppointments = await shopmonkeyRequest<Appointment[]>('GET', '/appointment', undefined, params);
+          const appointments = fetchedAppointments.filter(a => isWithinDateRange(String(a.startDate ?? ''), String(args.startDate), String(args.endDate)));
 
       const breakdown: Record<string, { count: number }> = {
               Confirmed: { count: 0 },
