@@ -1,5 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { shopmonkeyRequest, sanitizePathParam, getDefaultLocationId, buildDateRangeWhere } from '../client.js';
+import { shopmonkeyRequest, sanitizePathParam, getDefaultLocationId, isWithinDateRange } from '../client.js';
 import type { Appointment } from '../types/shopmonkey.js';
 import type { ToolHandlerMap } from '../types/tools.js';
 import { pickFields } from '../types/tools.js';
@@ -74,21 +74,39 @@ function applyDefaultLocation(params: Record<string, string>): void {
 
 export const handlers: ToolHandlerMap = {
     async list_appointments(args) {
-          const params: Record<string, string> = {};
+          const hasDateFilter = args.startDate !== undefined || args.endDate !== undefined;
+          const requestedLimit = args.limit !== undefined ? Number(args.limit) : 25;
+
+      const params: Record<string, string> = {};
           if (args.customerId !== undefined) params.customerId = String(args.customerId);
           if (args.locationId !== undefined) params.locationId = String(args.locationId);
-          const where = buildDateRangeWhere(
-                  'startDate',
-                  args.startDate !== undefined ? String(args.startDate) : undefined,
-                  args.endDate !== undefined ? String(args.endDate) : undefined
-                );
-          if (where) params.where = where;
-          if (args.limit !== undefined) params.limit = String(args.limit);
-          if (args.skip !== undefined) params.skip = String(args.skip);
+          // Shopmonkey's /appointment endpoint does not reliably filter by date
+      // server-side (verified against the live API: neither flat startDate/
+      // endDate params nor a `where` clause worked). When a date filter is
+      // requested, fetch a larger batch (capped at 100, matching the report
+      // tools' cap) and filter client-side against the appointment's own
+      // startDate — see isWithinDateRange in client.ts. Without a date filter,
+      // fall back to normal pagination via limit/skip.
+      if (hasDateFilter) {
+              params.limit = '100';
+      } else {
+              if (args.limit !== undefined) params.limit = String(args.limit);
+              if (args.skip !== undefined) params.skip = String(args.skip);
+      }
           applyDefaultLocation(params);
 
-      const data = await shopmonkeyRequest<Appointment[]>('GET', '/appointment', undefined, params);
-          return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
+      const fetched = await shopmonkeyRequest<Appointment[]>('GET', '/appointment', undefined, params);
+          const data = hasDateFilter
+            ? fetched
+                      .filter(a => isWithinDateRange(
+                                    String(a.startDate ?? ''),
+                                    args.startDate !== undefined ? String(args.startDate) : undefined,
+                                    args.endDate !== undefined ? String(args.endDate) : undefined
+                                  ))
+                      .slice(0, requestedLimit)
+                  : fetched;
+
+      return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
     },
 
     async get_appointment(args) {
