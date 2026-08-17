@@ -1,17 +1,18 @@
 // Composite report tools aggregate Shopmonkey list endpoints client-side.
-// Shopmonkey has no native /report endpoint, these tools compose the data from
-// existing list endpoints (Option B, confirmed with client). Reports are capped at
-// 100 records per call; use a tighter date range for high-volume shops.
+// Shopmonkey has no native /report endpoint — these tools compose the data from
+// existing list endpoints (Option B, confirmed with client). Reports paginate
+// through up to 500 records per call (see fetchAllRecords in client.ts); use a
+// tighter date range for very high-volume shops.
 // All tools return raw JSON (not Markdown) for downstream processing flexibility.
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { shopmonkeyRequest, getDefaultLocationId, isWithinDateRange } from '../client.js';
+import { fetchAllRecords, getDefaultLocationId, isWithinDateRange } from '../client.js';
 import type { Order, Appointment } from '../types/shopmonkey.js';
 import type { ToolHandlerMap } from '../types/tools.js';
 
 export const definitions: Tool[] = [
   {
         name: 'report_revenue_summary',
-        description: 'Generate a revenue summary report for a date range. Aggregates orders by status and splits paid vs. unpaid revenue. Capped at 100 orders, use a tighter date range for high-volume shops.',
+        description: 'Generate a revenue summary report for a date range. Aggregates orders by status and splits paid vs. unpaid revenue. Paginates through up to 500 orders — use a tighter date range for very high-volume shops.',
         inputSchema: {
                 type: 'object' as const,
                 properties: {
@@ -24,7 +25,7 @@ export const definitions: Tool[] = [
   },
   {
         name: 'report_appointment_summary',
-        description: 'Generate an appointment summary report for a date range. Counts appointments by confirmation status (Confirmed/Declined/NoResponse). Capped at 100 appointments.',
+        description: 'Generate an appointment summary report for a date range. Counts appointments by confirmation status (Confirmed/Declined/NoResponse). Paginates through up to 500 appointments.',
         inputSchema: {
                 type: 'object' as const,
                 properties: {
@@ -37,7 +38,7 @@ export const definitions: Tool[] = [
   },
   {
         name: 'report_open_estimates',
-        description: 'List all open (unauthorized) estimates, showing their age in days. Useful for follow-up on stale estimates. Capped at 100 records.',
+        description: 'List all open (unauthorized) estimates, showing their age in days. Useful for follow-up on stale estimates. Paginates through up to 500 records.',
         inputSchema: {
                 type: 'object' as const,
                 properties: {
@@ -47,10 +48,8 @@ export const definitions: Tool[] = [
   },
   ];
 
-
-
 function getDefaultLocParam(): Record<string, string> {
-    const params: Record<string, string> = { limit: '100' };
+    const params: Record<string, string> = {};
     const defaultId = getDefaultLocationId();
     if (defaultId) params.locationId = defaultId;
     return params;
@@ -65,10 +64,11 @@ export const handlers: ToolHandlerMap = {
           if (args.locationId !== undefined) params.locationId = String(args.locationId);
           // Shopmonkey's /order endpoint does not reliably filter by date
       // server-side (verified against the live API), so we filter client-side
-      // against the order's createdDate. See isWithinDateRange in client.ts.
-      const fetchedOrders = await shopmonkeyRequest<Order[]>('GET', '/order', undefined, params);
+      // against the order's createdDate. A single capped fetch also isn't
+      // stable across calls (verified live), so we page through everything
+      // via fetchAllRecords instead — see client.ts for details.
+      const { records: fetchedOrders, truncated } = await fetchAllRecords<Order>('/order', params, { maxRecords: 500 });
           const orders = fetchedOrders.filter(o => isWithinDateRange(String(o.createdDate ?? ''), String(args.startDate), String(args.endDate)));
-
 
       const breakdown: Record<string, { count: number; totalCostCents: number }> = {};
           let totalCostCents = 0;
@@ -95,6 +95,7 @@ export const handlers: ToolHandlerMap = {
               },
               breakdown,
               count: orders.length,
+              truncated,
       };
 
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -107,8 +108,9 @@ export const handlers: ToolHandlerMap = {
       const params = getDefaultLocParam();
           if (args.locationId !== undefined) params.locationId = String(args.locationId);
           // See note in report_revenue_summary above — filtering is done
-      // client-side against the appointment's own startDate.
-      const fetchedAppointments = await shopmonkeyRequest<Appointment[]>('GET', '/appointment', undefined, params);
+      // client-side against the appointment's own startDate, over a full
+      // paginated sweep rather than a single unstable capped fetch.
+      const { records: fetchedAppointments, truncated } = await fetchAllRecords<Appointment>('/appointment', params, { maxRecords: 500 });
           const appointments = fetchedAppointments.filter(a => isWithinDateRange(String(a.startDate ?? ''), String(args.startDate), String(args.endDate)));
 
       const breakdown: Record<string, { count: number }> = {
@@ -130,6 +132,7 @@ export const handlers: ToolHandlerMap = {
               period: { startDate: args.startDate, endDate: args.endDate },
               totals: { count: appointments.length },
               breakdown,
+              truncated,
       };
 
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -140,7 +143,7 @@ export const handlers: ToolHandlerMap = {
           if (args.locationId !== undefined) params.locationId = String(args.locationId);
           params.status = 'Estimate';
 
-      const orders = await shopmonkeyRequest<Order[]>('GET', '/order', undefined, params);
+      const { records: orders, truncated } = await fetchAllRecords<Order>('/order', params, { maxRecords: 500 });
 
       const now = new Date();
           const openEstimates = orders
@@ -160,6 +163,7 @@ export const handlers: ToolHandlerMap = {
               orders: openEstimates,
               count: openEstimates.length,
               oldestAgeInDays,
+              truncated,
       };
 
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
