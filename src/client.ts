@@ -11,195 +11,215 @@ let activeRequests = 0;
 const requestQueue: Array<{ resolve: () => void }> = [];
 
 async function acquireSlot(): Promise<void> {
-  if (activeRequests < MAX_CONCURRENT) {
-    activeRequests++;
-    return;
-  }
-  return new Promise<void>((resolve) => {
-    requestQueue.push({ resolve });
-  });
+    if (activeRequests < MAX_CONCURRENT) {
+          activeRequests++;
+          return;
+    }
+    return new Promise<void>((resolve) => {
+          requestQueue.push({ resolve });
+    });
 }
 
 function releaseSlot(): void {
-  activeRequests--;
-  const next = requestQueue.shift();
-  if (next) {
-    activeRequests++;
-    next.resolve();
-  }
+    activeRequests--;
+    const next = requestQueue.shift();
+    if (next) {
+          activeRequests++;
+          next.resolve();
+    }
 }
 
 function getApiKey(): string {
-  const key = process.env.SHOPMONKEY_API_KEY;
-  if (!key) {
-    throw new Error(
-      'SHOPMONKEY_API_KEY is not configured. ' +
-      'Set it in your environment, .env file, or MCP client config. ' +
-      'Create one at: Shopmonkey Settings > Integration > API Keys'
-    );
-  }
-  return key;
+    const key = process.env.SHOPMONKEY_API_KEY;
+    if (!key) {
+          throw new Error(
+                  'SHOPMONKEY_API_KEY is not configured. ' +
+                  'Set it in your environment, .env file, or MCP client config. ' +
+                  'Create one at: Shopmonkey Settings > Integration > API Keys'
+                );
+    }
+    return key;
 }
 
 export function getDefaultLocationId(): string | undefined {
-  return process.env.SHOPMONKEY_LOCATION_ID || undefined;
+    return process.env.SHOPMONKEY_LOCATION_ID || undefined;
 }
 
 async function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function parseRetryAfter(header: string | null, attempt: number): number {
-  if (!header) return 1000 * Math.pow(2, attempt);
-  const seconds = parseInt(header, 10);
-  if (!isNaN(seconds)) return seconds * 1000;
-  const date = Date.parse(header);
-  if (!isNaN(date)) return Math.max(0, date - Date.now());
-  return 1000 * Math.pow(2, attempt);
+    if (!header) return 1000 * Math.pow(2, attempt);
+    const seconds = parseInt(header, 10);
+    if (!isNaN(seconds)) return seconds * 1000;
+    const date = Date.parse(header);
+    if (!isNaN(date)) return Math.max(0, date - Date.now());
+    return 1000 * Math.pow(2, attempt);
 }
 
 export function sanitizePathParam(value: string): string {
-  return encodeURIComponent(value);
+    return encodeURIComponent(value);
+}
+
+// Shopmonkey's flat list endpoints (GET /order, GET /appointment, etc.) do NOT
+// support ad-hoc query params like startDate/endDate/status as top-level
+// filters, those are silently ignored by the API. The only documented
+// filtering mechanism on these endpoints is the where query param: a
+// JSON-encoded object using Mongo-style comparison operators ($gte, $lte,
+// $eq, etc.).
+// This helper builds that JSON string for a date-range filter on a given
+// field. Returns undefined if neither bound is provided (no filter).
+export function buildDateRangeWhere(
+    field: string,
+    startDate?: string,
+    endDate?: string
+  ): string | undefined {
+    if (!startDate && !endDate) return undefined;
+    const clause: Record<string, string> = {};
+    if (startDate) clause.$gte = startDate;
+    if (endDate) clause.$lte = endDate;
+    return JSON.stringify({ [field]: clause });
 }
 
 export async function shopmonkeyRequest<T>(
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
-  path: string,
-  body?: Record<string, unknown>,
-  params?: Record<string, string>
-): Promise<T> {
-  const apiKey = getApiKey();
-  await acquireSlot();
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+    path: string,
+    body?: Record<string, unknown>,
+    params?: Record<string, string>
+  ): Promise<T> {
+    const apiKey = getApiKey();
+    await acquireSlot();
 
   try {
-    return await shopmonkeyRequestInner<T>(apiKey, method, path, body, params);
+        return await shopmonkeyRequestInner<T>(apiKey, method, path, body, params);
   } finally {
-    releaseSlot();
+        releaseSlot();
   }
 }
 
 async function shopmonkeyRequestInner<T>(
-  apiKey: string,
-  method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
-  path: string,
-  body?: Record<string, unknown>,
-  params?: Record<string, string>
-): Promise<T> {
-  let url: URL;
-  try {
-    url = new URL(`${BASE_URL}${path}`);
-  } catch {
-    throw new Error(`Invalid API URL: ${BASE_URL}${path}. Check SHOPMONKEY_BASE_URL configuration.`);
-  }
+    apiKey: string,
+    method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
+    path: string,
+    body?: Record<string, unknown>,
+    params?: Record<string, string>
+  ): Promise<T> {
+    let url: URL;
+    try {
+          url = new URL(`${BASE_URL}${path}`);
+    } catch {
+          throw new Error(`Invalid API URL: ${BASE_URL}${path}. Check SHOPMONKEY_BASE_URL configuration.`);
+    }
 
   if (params) {
-    for (const [key, value] of Object.entries(params)) {
-      if (value !== undefined && value !== '') {
-        url.searchParams.set(key, value);
-      }
-    }
+        for (const [key, value] of Object.entries(params)) {
+                if (value !== undefined && value !== '') {
+                          url.searchParams.set(key, value);
+                }
+        }
   }
 
   const headers: Record<string, string> = {
-    'Authorization': `Bearer ${apiKey}`,
+        'Authorization': `Bearer ${apiKey}`,
   };
-  if (body) {
-    headers['Content-Type'] = 'application/json';
-  }
+    if (body) {
+          headers['Content-Type'] = 'application/json';
+    }
 
   let lastError: Error | null = null;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-    let response: Response;
+        let response: Response;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-
-    try {
-      response = await fetch(url.toString(), {
-        method,
-        headers,
-        body: body ? JSON.stringify(body) : undefined,
-        signal: controller.signal,
-      });
-    } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
-        lastError = new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
-      } else {
-        lastError = error instanceof Error ? error : new Error(String(error));
-      }
-      if (attempt < MAX_RETRIES - 1) {
-        await sleep(1000 * Math.pow(2, attempt));
-        continue;
-      }
-      throw new Error(`Network error after ${MAX_RETRIES} attempts: ${lastError.message}`);
-    } finally {
-      clearTimeout(timeoutId);
-    }
-
-    if (RETRYABLE_STATUS_CODES.has(response.status)) {
-      const retryAfter = response.headers.get('Retry-After');
-      const waitMs = parseRetryAfter(retryAfter, attempt);
-
-      if (attempt < MAX_RETRIES - 1) {
-        await sleep(waitMs);
-        continue;
-      }
-
-      if (response.status === 429) {
-        throw new Error(
-          `Rate limited by Shopmonkey API after ${MAX_RETRIES} attempts. ` +
-          `Retry after ${retryAfter ?? 'unknown'} seconds.`
-        );
-      }
-      lastError = new Error(`Shopmonkey API returned ${response.status} after ${MAX_RETRIES} attempts`);
-      break;
-    }
-
-    if (!response.ok) {
-      const text = await response.text();
-      let errorMessage: string;
-      let errorCode: string | undefined;
+      const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
       try {
-        const errorData = JSON.parse(text) as ShopmonkeyResponse<unknown>;
-        errorMessage = errorData.message ?? `HTTP ${response.status}`;
-        errorCode = errorData.code;
-      } catch {
-        errorMessage = text || `HTTP ${response.status} ${response.statusText}`;
+              response = await fetch(url.toString(), {
+                        method,
+                        headers,
+                        body: body ? JSON.stringify(body) : undefined,
+                        signal: controller.signal,
+              });
+      } catch (error) {
+              if (error instanceof DOMException && error.name === 'AbortError') {
+                        lastError = new Error(`Request timed out after ${REQUEST_TIMEOUT_MS / 1000}s`);
+              } else {
+                        lastError = error instanceof Error ? error : new Error(String(error));
+              }
+              if (attempt < MAX_RETRIES - 1) {
+                        await sleep(1000 * Math.pow(2, attempt));
+                        continue;
+              }
+              throw new Error(`Network error after ${MAX_RETRIES} attempts: ${lastError.message}`);
+      } finally {
+              clearTimeout(timeoutId);
       }
 
-      throw new Error(
-        errorCode
-          ? `Shopmonkey API error [${errorCode}]: ${errorMessage}`
-          : `Shopmonkey API error: ${errorMessage}`
-      );
-    }
+      if (RETRYABLE_STATUS_CODES.has(response.status)) {
+              const retryAfter = response.headers.get('Retry-After');
+              const waitMs = parseRetryAfter(retryAfter, attempt);
 
-    if (response.status === 204 || response.headers.get('content-length') === '0') {
-      return undefined as T;
-    }
+          if (attempt < MAX_RETRIES - 1) {
+                    await sleep(waitMs);
+                    continue;
+          }
 
-    let data: ShopmonkeyResponse<T>;
-    try {
-      data = await response.json() as ShopmonkeyResponse<T>;
-    } catch {
-      throw new Error(`Invalid JSON response from Shopmonkey API (HTTP ${response.status})`);
-    }
+          if (response.status === 429) {
+                    throw new Error(
+                                `Rate limited by Shopmonkey API after ${MAX_RETRIES} attempts. ` +
+                                `Retry after ${retryAfter ?? 'unknown'} seconds.`
+                              );
+          }
+              lastError = new Error(`Shopmonkey API returned ${response.status} after ${MAX_RETRIES} attempts`);
+              break;
+      }
 
-    if (!data.success) {
-      throw new Error(
-        data.code
-          ? `Shopmonkey API error [${data.code}]: ${data.message ?? 'Unknown error'}`
-          : `Shopmonkey API error: ${data.message ?? 'Unknown error'}`
-      );
-    }
+      if (!response.ok) {
+              const text = await response.text();
+              let errorMessage: string;
+              let errorCode: string | undefined;
 
-    if (data.data === undefined || data.data === null) {
-      throw new Error('Shopmonkey API returned success but no data');
-    }
+          try {
+                    const errorData = JSON.parse(text) as ShopmonkeyResponse<unknown>;
+                    errorMessage = errorData.message ?? `HTTP ${response.status}`;
+                    errorCode = errorData.code;
+          } catch {
+                    errorMessage = text || `HTTP ${response.status} ${response.statusText}`;
+          }
 
-    return data.data;
+          throw new Error(
+                    errorCode
+                      ? `Shopmonkey API error [${errorCode}]: ${errorMessage}`
+                      : `Shopmonkey API error: ${errorMessage}`
+                  );
+      }
+
+      if (response.status === 204 || response.headers.get('content-length') === '0') {
+              return undefined as T;
+      }
+
+      let data: ShopmonkeyResponse<T>;
+        try {
+                data = await response.json() as ShopmonkeyResponse<T>;
+        } catch {
+                throw new Error(`Invalid JSON response from Shopmonkey API (HTTP ${response.status})`);
+        }
+
+      if (!data.success) {
+              throw new Error(
+                        data.code
+                          ? `Shopmonkey API error [${data.code}]: ${data.message ?? 'Unknown error'}`
+                          : `Shopmonkey API error: ${data.message ?? 'Unknown error'}`
+                      );
+      }
+
+      if (data.data === undefined || data.data === null) {
+              throw new Error('Shopmonkey API returned success but no data');
+      }
+
+      return data.data;
   }
 
   throw lastError ?? new Error('Request failed after maximum retries');
