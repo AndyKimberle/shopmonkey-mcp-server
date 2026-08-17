@@ -5,8 +5,8 @@
     "dockerfilePath": "proxy/Dockerfile"
   },
   "deploy": {
-    "startCommand": "mcp-auth-proxy ${{BACKEND_MCP_URL}}",    "healthcheckPath": "/.well-known/oauth-protected-resource",
-    "healthcheckTimeout": 30,
+    "startCommand": "mcp-auth-proxy https://shopmonkey-mcp-server-production-f189.up.railway.app",
+        "healthcheckPath": "/.well-known/oauth-protected-resource","healthcheckTimeout": 30,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5
   }
