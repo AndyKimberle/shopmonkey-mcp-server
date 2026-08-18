@@ -5,7 +5,7 @@
 // tighter date range for very high-volume shops.
 // All tools return raw JSON (not Markdown) for downstream processing flexibility.
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { fetchAllRecords, getDefaultLocationId, isWithinDateRange } from '../client.js';
+import { fetchAllRecords, getDefaultLocationId, isWithinDateRange, shopmonkeyRequest, toDateRangeBoundary } from '../client.js';
 import type { Order, Appointment } from '../types/shopmonkey.js';
 import type { ToolHandlerMap } from '../types/tools.js';
 
@@ -25,7 +25,7 @@ export const definitions: Tool[] = [
   },
   {
         name: 'report_appointment_summary',
-        description: 'Generate an appointment summary report for a date range. Counts appointments by confirmation status (Confirmed/Declined/NoResponse). Paginates through up to 500 appointments.',
+        description: 'Generate an appointment summary report for a date range. Counts appointments by confirmation status (Confirmed/Declined/NoResponse). Uses the /appointment/search endpoint for a reliable server-side date filter.',
         inputSchema: {
                 type: 'object' as const,
                 properties: {
@@ -105,13 +105,26 @@ export const handlers: ToolHandlerMap = {
           if (!args.startDate) return { content: [{ type: 'text', text: 'Error: startDate is required' }], isError: true };
           if (!args.endDate) return { content: [{ type: 'text', text: 'Error: endDate is required' }], isError: true };
 
-      const params = getDefaultLocParam();
-          if (args.locationId !== undefined) params.locationId = String(args.locationId);
-          // See note in report_revenue_summary above — filtering is done
-      // client-side against the appointment's own startDate, over a full
-      // paginated sweep rather than a single unstable capped fetch.
-      const { records: fetchedAppointments, truncated } = await fetchAllRecords<Appointment>('/appointment', params, { maxRecords: 500 });
-          const appointments = fetchedAppointments.filter(a => isWithinDateRange(String(a.startDate ?? ''), String(args.startDate), String(args.endDate)));
+      // Shopmonkey's flat GET /appointment list endpoint does not reliably
+      // filter by date server-side (see client.ts). The dedicated POST
+      // /appointment/search endpoint documents a structured
+      // where.startDate.gte/lte range filter instead — use that so this
+      // report reflects exactly the requested date range rather than
+      // whatever happened to land in a capped client-side-filtered sweep.
+      const SEARCH_LIMIT = 500;
+          const where = {
+                  startDate: {
+                            gte: toDateRangeBoundary(String(args.startDate), 'start'),
+                            lte: toDateRangeBoundary(String(args.endDate), 'end'),
+                  },
+          };
+          let appointments = await shopmonkeyRequest<Appointment[]>('POST', '/appointment/search', { where, limit: SEARCH_LIMIT });
+          const truncated = appointments.length >= SEARCH_LIMIT;
+
+      const locationId = args.locationId !== undefined ? String(args.locationId) : getDefaultLocationId();
+          if (locationId) {
+                  appointments = appointments.filter(a => a.locationId === locationId);
+          }
 
       const breakdown: Record<string, { count: number }> = {
               Confirmed: { count: 0 },
