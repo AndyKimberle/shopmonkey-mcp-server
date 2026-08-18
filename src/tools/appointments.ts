@@ -1,5 +1,5 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { shopmonkeyRequest, fetchAllRecords, sanitizePathParam, getDefaultLocationId, isWithinDateRange } from '../client.js';
+import { shopmonkeyRequest, sanitizePathParam, getDefaultLocationId, toDateRangeBoundary } from '../client.js';
 import type { Appointment } from '../types/shopmonkey.js';
 import type { ToolHandlerMap } from '../types/tools.js';
 import { pickFields } from '../types/tools.js';
@@ -7,7 +7,7 @@ import { pickFields } from '../types/tools.js';
 export const definitions: Tool[] = [
   {
         name: 'list_appointments',
-        description: 'List appointments from Shopmonkey. Supports filtering and pagination. Date-filtered queries page through up to 500 records server-side to ensure a complete, stable result.',
+        description: 'List appointments from Shopmonkey. Supports filtering and pagination. Date-filtered queries use the dedicated /appointment/search endpoint for a reliable, server-side date range filter.',
         inputSchema: {
                 type: 'object' as const,
                 properties: {
@@ -77,35 +77,48 @@ export const handlers: ToolHandlerMap = {
           const hasDateFilter = args.startDate !== undefined || args.endDate !== undefined;
           const requestedLimit = args.limit !== undefined ? Number(args.limit) : 25;
 
-      const params: Record<string, string> = {};
-          if (args.customerId !== undefined) params.customerId = String(args.customerId);
-          if (args.locationId !== undefined) params.locationId = String(args.locationId);
-          applyDefaultLocation(params);
-
       if (hasDateFilter) {
-              // Shopmonkey's /appointment endpoint does not reliably filter by date
-            // server-side (verified against the live API: neither flat startDate/
-            // endDate params nor a `where` clause worked). A single capped fetch
-            // also isn't stable across calls — identical requests seconds apart
-            // returned different, sometimes non-overlapping subsets of
-            // appointments when verified live. So when a date filter is
-            // requested we page through up to 500 records via fetchAllRecords
-            // (see client.ts) and filter client-side against the appointment's
-            // own startDate — see isWithinDateRange in client.ts.
-            const { records: fetched } = await fetchAllRecords<Appointment>('/appointment', params, { maxRecords: 500 });
-              const data = fetched
-                .filter(a => isWithinDateRange(
-                            String(a.startDate ?? ''),
-                            args.startDate !== undefined ? String(args.startDate) : undefined,
-                            args.endDate !== undefined ? String(args.endDate) : undefined
-                          ))
-                .slice(0, requestedLimit);
+              // Shopmonkey's flat GET /appointment list endpoint does not reliably
+            // filter by date server-side (verified against the live API: neither
+            // flat startDate/endDate query params nor a Mongo-style `where` param
+            // on that endpoint had any effect — see client.ts). The dedicated
+            // POST /appointment/search endpoint is different: it documents a
+            // structured `where.startDate.gte`/`where.startDate.lte` range filter
+            // that Shopmonkey's own docs confirm is meant for exactly this. Using
+            // it means we ask the API for only the matching date range instead of
+            // pulling a large batch and filtering client-side — which matters for
+            // shops with more historical appointments than any client-side fetch
+            // cap could realistically cover.
+            const where: Record<string, unknown> = {
+                      startDate: {
+                                  ...(args.startDate !== undefined ? { gte: toDateRangeBoundary(String(args.startDate), 'start') } : {}),
+                                  ...(args.endDate !== undefined ? { lte: toDateRangeBoundary(String(args.endDate), 'end') } : {}),
+                      },
+            };
+              if (args.customerId !== undefined) where.customerId = String(args.customerId);
+
+            const body: Record<string, unknown> = { where, limit: requestedLimit };
+              if (args.skip !== undefined) body.skip = Number(args.skip);
+
+            let data = await shopmonkeyRequest<Appointment[]>('POST', '/appointment/search', body);
+
+            // The /appointment/search `where` schema doesn't support filtering by
+            // locationId, so apply that filter client-side against the (already
+            // date-narrowed, typically small) result set.
+            const locationId = args.locationId !== undefined ? String(args.locationId) : getDefaultLocationId();
+              if (locationId) {
+                        data = data.filter(a => a.locationId === locationId);
+              }
 
             return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] };
       }
 
-      // No date filter: normal single-page pagination via limit/skip.
-      if (args.limit !== undefined) params.limit = String(args.limit);
+      // No date filter: normal single-page pagination via limit/skip on the flat list endpoint.
+      const params: Record<string, string> = {};
+          if (args.customerId !== undefined) params.customerId = String(args.customerId);
+          if (args.locationId !== undefined) params.locationId = String(args.locationId);
+          applyDefaultLocation(params);
+          if (args.limit !== undefined) params.limit = String(args.limit);
           if (args.skip !== undefined) params.skip = String(args.skip);
 
       const data = await shopmonkeyRequest<Appointment[]>('GET', '/appointment', undefined, params);
