@@ -1,23 +1,29 @@
 // Composite report tools aggregate Shopmonkey list endpoints client-side.
 // Shopmonkey has no native /report endpoint — these tools compose the data from
-// existing list endpoints (Option B, confirmed with client). Reports paginate
-// through up to 1500 records per call (see fetchAllRecords in client.ts); use a
-// tighter date range for very high-volume shops. Even at 1500, a shop with more
-// total orders than that may still see an undercount for older date ranges —
-// the `truncated` field in the response signals when this happened. There is
-// no dedicated /order/search endpoint (checked against Shopmonkey's docs), so
-// unlike appointments, orders can't get a fully reliable server-side date
-// filter — see docs/LIMITATIONS.md.
+// existing list endpoints (Option B, confirmed with client). There is no
+// dedicated /order/search endpoint (checked against Shopmonkey's docs), so
+// unlike appointments, orders can't get a reliable server-side date filter.
+//
+// Order-based reports (report_revenue_summary, report_open_estimates) use
+// fetchAllRecordsParallel (see client.ts), which requests a large, fixed
+// number of pages every call rather than stopping at a cap — verified live
+// against this shop's 2000+ orders: capping the fetch (even at 1500)
+// produced a different total on every identical call, because the
+// underlying list has no stable sort order and a capped window only ever
+// covers part of it. Requesting the full, fixed page budget every time
+// removes that source of inconsistency. `truncated: true` in the response
+// means the shop has grown past the current page budget and results may be
+// incomplete — see docs/LIMITATIONS.md.
 // All tools return raw JSON (not Markdown) for downstream processing flexibility.
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { fetchAllRecords, getDefaultLocationId, isWithinDateRange, shopmonkeyRequest, toDateRangeBoundary } from '../client.js';
+import { fetchAllRecordsParallel, getDefaultLocationId, isWithinDateRange, shopmonkeyRequest, toDateRangeBoundary } from '../client.js';
 import type { Order, Appointment } from '../types/shopmonkey.js';
 import type { ToolHandlerMap } from '../types/tools.js';
 
 export const definitions: Tool[] = [
   {
             name: 'report_revenue_summary',
-            description: 'Generate a revenue summary report for orders invoiced within a date range (filters on invoicedDate, not order creation date). Aggregates by status and splits paid vs. unpaid revenue. Paginates through up to 1500 orders — use a tighter date range for very high-volume shops, and check the `truncated` field.',
+            description: 'Generate a revenue summary report for orders invoiced within a date range (filters on invoicedDate, not order creation date). Aggregates by status and splits paid vs. unpaid revenue. Scans the full order history each call (up to an 8000-order budget) for a consistent result — check the `truncated` field if the shop has grown past that.',
             inputSchema: {
                               type: 'object' as const,
                               properties: {
@@ -43,7 +49,7 @@ export const definitions: Tool[] = [
   },
   {
             name: 'report_open_estimates',
-            description: 'List all open (unauthorized) estimates, showing their age in days. Useful for follow-up on stale estimates. Paginates through up to 1500 records.',
+            description: 'List all open (unauthorized) estimates, showing their age in days. Useful for follow-up on stale estimates. Scans the full order history each call (up to an 8000-order budget); check the `truncated` field if the shop has grown past that.',
             inputSchema: {
                               type: 'object' as const,
                               properties: {
@@ -74,10 +80,11 @@ export const handlers: ToolHandlerMap = {
         // this week" are different questions, and an order created weeks ago
         // can be invoiced today. Orders never invoiced (invoicedDate null,
         // e.g. open Estimates) are correctly excluded from this report as a
-        // result. A single capped fetch also isn't stable across calls
-        // (verified live), so we page through everything via fetchAllRecords
+        // result. A capped fetch also isn't stable across calls (verified
+        // live: identical queries returned different totals), so we use
+        // fetchAllRecordsParallel to scan the full order history every call
         // instead — see client.ts for details.
-        const { records: fetchedOrders, truncated } = await fetchAllRecords<Order>('/order', params, { maxRecords: 1500 });
+        const { records: fetchedOrders, truncated } = await fetchAllRecordsParallel<Order>('/order', params);
                   const orders = fetchedOrders.filter(o => isWithinDateRange(String(o.invoicedDate ?? ''), String(args.startDate), String(args.endDate)));
 
         const breakdown: Record<string, { count: number; totalCostCents: number }> = {};
@@ -166,7 +173,7 @@ export const handlers: ToolHandlerMap = {
                   if (args.locationId !== undefined) params.locationId = String(args.locationId);
                   params.status = 'Estimate';
 
-        const { records: orders, truncated } = await fetchAllRecords<Order>('/order', params, { maxRecords: 1500 });
+        const { records: orders, truncated } = await fetchAllRecordsParallel<Order>('/order', params);
 
         const now = new Date();
                   const openEstimates = orders
