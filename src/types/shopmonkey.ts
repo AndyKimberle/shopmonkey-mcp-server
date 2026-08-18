@@ -199,3 +199,17 @@ export interface Location {
   phone?: string;
   [key: string]: unknown;
 }
+
+
+export interface Label {
+    id: string;
+    name?: string;
+    color?: string;
+    entity?: string;
+    companyId?: string;
+    locationId?: string;
+    saved?: boolean;
+    createdDate?: string;
+    updatedDate?: string;
+    [key: string]: unknown;
+}
